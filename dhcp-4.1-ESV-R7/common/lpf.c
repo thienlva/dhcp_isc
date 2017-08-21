@@ -26,6 +26,12 @@
  *   https://www.isc.org/
  */
 
+/* SRT-187 thienlv */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdlib.h>
+
 #include "dhcpd.h"
 #if defined (USE_LPF_SEND) || defined (USE_LPF_RECEIVE)
 #include <sys/ioctl.h>
@@ -41,6 +47,12 @@
 #include "includes/netinet/udp.h"
 #include "includes/netinet/if_ether.h"
 #include <net/if.h>
+
+/* SRT-187 thienlv */
+#include <stdarg.h>
+#include <stdio.h>
+#include <sched.h>
+#include <sys/mount.h>
 
 /* Reinitializes the specified interface after an address change.   This
    is not required for packet-filter APIs. */
@@ -63,11 +75,55 @@ void if_reinitialize_receive (info)
    Opens a packet filter for each interface and adds it to the select
    mask. */
 
+/* SRT-187 thienlv */
+int vrf_count = 0;
+
+#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 14
+#include "syscall.h"
+#ifdef SYS_setns
+int setns(int fd, int nstype)
+{
+  return syscall(SYS_setns, fd, nstype);
+}
+#endif /* SYS_setns */
+#endif /* GLIBC < 2.14 */
+
+static int set_ns (int fib)
+{
+	int fd = -1;
+	int ret = -1;
+    char buf[30];
+
+    sprintf (buf, "/var/run/netns/zebosfib%d", fib);
+
+    fd = open (buf, O_RDONLY, 0);
+	if (0 > fd)
+	{
+		return -1;
+	}
+	ret = setns (fd, CLONE_NEWNET);
+	if (0 > ret)
+	{
+		close (fd);
+		return ret;
+	}
+	
+	close (fd);
+	return 0;
+}
+
+void vrf_intf_num_set (int num)
+{
+    log_info ("vrf_intf_num_set = %d\n", num);
+    vrf_count = num;
+    return;
+}
 int if_register_lpf (info)
 	struct interface_info *info;
 {
 	int sock;
 	struct sockaddr sa;
+    int ret = 0; /* SRT-187 thienlv */
 
 	/* Make an LPF socket. */
 	if ((sock = socket(PF_PACKET, SOCK_PACKET,
@@ -104,6 +160,17 @@ int if_register_lpf (info)
 	}
 
 	get_hw_addr(info->name, &info->hw_address);
+
+    /* SRT-187 thienlv */
+    if (vrf_count > 0)
+    {
+        if (--vrf_count == 0)
+        {
+            ret = set_ns (0);
+            if (ret < 0)
+                log_fatal ("Failed to set new net namespace\n");
+        }
+    }
 
 	return sock;
 }

@@ -99,6 +99,9 @@ enum { forward_and_append,	/* Forward and append our own relay option. */
 u_int16_t local_port;
 u_int16_t remote_port;
 
+/* SRT-187 thienlv */
+int vrf_intf_count = 0;
+
 /* Relay agent server list. */
 struct server_list {
 	struct server_list *next;
@@ -373,6 +376,10 @@ main(int argc, char **argv) {
 			   !strcmp(argv[i], "-h")) {
 			log_info(DHCRELAY_USAGE);
 			exit(0);
+		} else if (!strcmp(argv[i], "-nf")) { /* SRT-187 thienlv */
+            if (++i == argc)
+                usage();
+            vrf_intf_count = atoi(argv[i]);
  		} else if (argv[i][0] == '-') {
 			usage();
  		} else {
@@ -521,6 +528,7 @@ main(int argc, char **argv) {
 	gettimeofday(&cur_tv, NULL);
 
 	/* Discover all the network interfaces. */
+    vrf_intf_num_set (vrf_intf_count); /* SRT-187 thienlv */
 	discover_interfaces(DISCOVER_RELAY);
 
 #ifdef DHCPv6

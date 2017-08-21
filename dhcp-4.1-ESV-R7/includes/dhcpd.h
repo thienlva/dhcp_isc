@@ -2190,6 +2190,7 @@ void if_deregister_receive (struct interface_info *);
 ssize_t receive_packet (struct interface_info *,
 			unsigned char *, size_t,
 			struct sockaddr_in *, struct hardware *);
+void vrf_intf_num_set (int num); /* SRT-187 thienlv */
 #endif
 
 #if defined (USE_SOCKET_FALLBACK)
