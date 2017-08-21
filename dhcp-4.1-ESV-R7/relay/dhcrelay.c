@@ -37,6 +37,44 @@
 #include <sys/time.h>
 #include <signal.h>
 
+/* SRT-188 thienlv: start */
+#include <stdarg.h>
+#include <stdio.h>
+
+#include <sys/un.h>
+#include <sys/socket.h>
+#include <ctype.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
+#define IPC_BUF_SIZE_MAX                30
+
+#define RIB_SERVER_SOCK_PATH        "/tmp/rib_serv_dhcpr"
+#define DHCPR_CLIENT_PATH           "/tmp/dhcpr_client_"
+
+int rib_client_fd = 0;
+struct sockaddr_un svaddr;
+struct sockaddr_un claddr;
+
+struct prefix_ipv4
+{
+    u_int8_t family;
+    u_int8_t prefixlen;
+    u_int8_t pad1;
+    u_int8_t pad2;
+    struct in_addr prefix;
+};
+
+typedef struct dhcpr_req_info
+{
+    struct prefix_ipv4 p;
+    char ifname [IFNAMSIZ];
+    struct in_addr nh;
+} dhcpr_req_info_t;
+
+/* SRT-188 thienlv: end */
+
+
 TIME default_lease_time = 43200; /* 12 hours... */
 TIME max_lease_time = 86400; /* 24 hours... */
 struct tree_cache *global_options[256];
@@ -124,9 +162,12 @@ static void setup_streams(void);
 static void do_relay4(struct interface_info *, struct dhcp_packet *,
 	              unsigned int, unsigned int, struct iaddr,
 		      struct hardware *);
+/* SRT-188 thienlv: start */
 static int add_relay_agent_options(struct interface_info *,
 				   struct dhcp_packet *, unsigned,
-				   struct in_addr);
+				   struct in_addr, struct server_list *server, int force_option_82);
+/* SRT-188 thienlv: end */
+
 static int find_interface_by_agent_option(struct dhcp_packet *,
 			       struct interface_info **, u_int8_t *, int);
 static int strip_relay_agent_options(struct interface_info *,
@@ -584,6 +625,29 @@ main(int argc, char **argv) {
 		dhcpv6_packet_handler = do_packet6;
 #endif
 
+/* SRT-188 thienlv: start */
+    rib_client_fd = socket (AF_UNIX, SOCK_DGRAM, 0);
+    if (0 > rib_client_fd)
+    {
+        log_error ("Can't create socket: error [%d] %m\n", errno);
+        return rib_client_fd;
+    }
+
+    memset (&claddr, 0, sizeof (struct sockaddr_un));
+    claddr.sun_family = AF_UNIX;
+    snprintf (claddr.sun_path, sizeof (claddr.sun_path), "/tmp/dhcpr_client_%ld", (long) getpid ());
+    if (0 > bind (rib_client_fd, (struct sockaddr *) &claddr, sizeof (struct sockaddr_un)))
+    {
+        log_error ("Can't bind socket to addr: error [%d] %m\n", errno);
+        return -1;
+    }
+
+    /* Initialize rib server address */
+    memset (&svaddr, 0, sizeof (struct sockaddr_un));
+    svaddr.sun_family = AF_UNIX;
+    strncpy (svaddr.sun_path, RIB_SERVER_SOCK_PATH, sizeof (svaddr.sun_path) - 1);
+/* SRT-188 thienlv: end */
+
 	/* Start dispatching packets and timeouts... */
 	dispatch();
 
@@ -599,6 +663,19 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
 	struct sockaddr_in to;
 	struct interface_info *out;
 	struct hardware hto, *htop;
+    int ret = 0;
+
+/* SRT-188 thienlv: start */
+    int len = 0;
+    char resp[IPC_BUF_SIZE_MAX];
+    int numBytes = 0;
+    dhcpr_req_info_t dhcpr_req, rib_reply;
+    int ret_ip = 0;
+    struct sockaddr_in tmp;
+    int cnt = 0;
+    char *buff = NULL;
+    struct interface_info *intf = NULL;
+/* SRT-188 thienlv: end */
 
 	if (packet->hlen > sizeof packet->chaddr) {
 		log_info("Discarding packet with invalid hlen.");
@@ -692,10 +769,11 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
 
 	/* Add relay agent options if indicated.   If something goes wrong,
 	   drop the packet. */
+#if 0 /* SRT-188 thienlv */
 	if (!(length = add_relay_agent_options(ip, packet, length,
-					       ip->addresses[0])))
+					       ip->addresses[0], NULL)))
 		return;
-
+#endif 
 	/* If giaddr is not already set, Set it so the server can
 	   figure out what net it's from and so that we can later
 	   forward the response to the correct net.    If it's already
@@ -711,11 +789,68 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
 	/* Otherwise, it's a BOOTREQUEST, so forward it to all the
 	   servers. */
 	for (sp = servers; sp; sp = sp->next) {
-		if (send_packet((fallback_interface
+/* SRT-188 thienlv: start */
+        if (!(length = add_relay_agent_options(ip, packet, length,
+                               ip->addresses[0], sp, 0)))
+            return;
+/* SRT-188 thienlv: end */
+
+		ret = send_packet((fallback_interface
 				 ? fallback_interface : interfaces),
 				 NULL, packet, length, ip->addresses[0],
-				 &sp->to, NULL) < 0) {
-			++client_packet_errors;
+				 &sp->to, NULL);
+
+/* SRT-188 thienlv: start */
+		if (ret < 0)
+	    {
+            if (errno = ENETUNREACH)
+            {
+                len = sizeof (dhcpr_req_info_t);
+                memset (&dhcpr_req, 0, sizeof (dhcpr_req_info_t));
+                memset (&rib_reply, 0, sizeof (dhcpr_req_info_t));
+                strncpy (dhcpr_req.ifname, ip->name, IFNAMSIZ);
+                dhcpr_req.p.family = AF_INET;
+                dhcpr_req.p.prefixlen = 32; /* Maximum mask */
+                memcpy (&dhcpr_req.p.prefix, &sp->to.sin_addr, sizeof (struct in_addr));
+                
+                if (0 <= rib_client_fd)
+                {
+                    /* Send req message to RIB server */
+                    if (len != sendto (rib_client_fd, &dhcpr_req, len, 0, (struct sockaddr *) &svaddr, 
+                                       sizeof (struct sockaddr_un)))
+                    {
+                        log_error ("Can't send message to rib server: error [%d] %m\n", errno);
+                        return;
+                    }
+                
+                    numBytes = recvfrom (rib_client_fd, &rib_reply, sizeof (dhcpr_req_info_t), 0, NULL, NULL);
+                    if (0 > numBytes)
+                    {
+                        log_error ("Can't receive message to rib server: error [%d] %m\n", errno);
+                        return;
+                    }
+                    log_info ("Receive from RIB server %d bytes and Nexthop [%s]\n", 
+                        numBytes, inet_ntoa (rib_reply.nh));
+                }
+
+                if (!add_agent_options)
+                {
+                    if (!(length = add_relay_agent_options(ip, packet, length,
+                                           ip->addresses[0], sp, 1)))
+                        return;
+                }
+
+                memset (&tmp, 0, sizeof (struct sockaddr_in));
+                memcpy (&tmp, &sp->to, sizeof (struct sockaddr_in));
+                memcpy (&tmp.sin_addr, &rib_reply.nh, sizeof (struct in_addr));
+
+                ret = send_packet((fallback_interface
+                         ? fallback_interface : interfaces),
+                         NULL, packet, length, ip->addresses[0],
+                         &tmp, NULL);
+                if (ret < 0)
+                    ++client_packet_errors;
+            } /* SRT-188 thienlv: end */
 		} else {
 			log_debug("Forwarded BOOTREQUEST for %s to %s",
 			       print_hw_addr(packet->htype, packet->hlen,
@@ -929,14 +1064,14 @@ find_interface_by_agent_option(struct dhcp_packet *packet,
  */
 static int
 add_relay_agent_options(struct interface_info *ip, struct dhcp_packet *packet,
-			unsigned length, struct in_addr giaddr) {
+			unsigned length, struct in_addr giaddr, struct server_list *server, int force_option_82) { /* SRT-188 thienlv */
 	int is_dhcp = 0, mms;
 	unsigned optlen;
 	u_int8_t *op, *nextop, *sp, *max, *end_pad = NULL;
 
 	/* If we're not adding agent options to packets, we can skip
 	   this. */
-	if (!add_agent_options)
+	if ((!add_agent_options) && (0 == force_option_82))
 		return (length);
 
 	/* If there's no cookie, it's a bootp packet, so we should just
@@ -1073,6 +1208,10 @@ add_relay_agent_options(struct interface_info *ip, struct dhcp_packet *packet,
 		optlen += ip->remote_id_len + 2;    /* RAI_REMOTE_ID + len */
 	}
 
+/* SRT-188 thienlv: start */
+    optlen += 6; // IP server option
+/* SRT-188 thienlv: end */
+
 	/* We do not support relay option fragmenting(multiple options to
 	 * support an option data exceeding 255 bytes).
 	 */
@@ -1104,6 +1243,13 @@ add_relay_agent_options(struct interface_info *ip, struct dhcp_packet *packet,
 			memcpy(sp, ip->remote_id, ip->remote_id_len);
 			sp += ip->remote_id_len;
 		}
+/* SRT-188 thienlv: start */
+		/* Add tried sub-option */
+		*sp++ = 12; /* Number of sub option */
+		*sp++ = 4;  /* Length of option IP addr */
+		memcpy(sp, &server->to.sin_addr, 4);
+		sp += 4;
+/* SRT-188 thienlv: end */
 	} else {
 		++agent_option_errors;
 		log_error("No room in packet (used %d of %d) "
