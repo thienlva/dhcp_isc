@@ -675,6 +675,47 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
     int cnt = 0;
     char *buff = NULL;
     struct interface_info *intf = NULL;
+
+    int is_bootp_reply_mpls = 0;
+    int idx = 240; /* start dhcp option */
+    int op_82_max_idx = 0;
+    int have_subop_12 = 0;
+
+    buff = (char *) packet;
+    if (!buff)
+        return;
+
+    if (packet->op == BOOTREPLY)
+    {
+        while (1)
+        {
+            if (0xff == buff[idx])
+            {
+               break;
+            }
+            else if (0x52 != buff[idx]) /* not option 82 */
+            {
+                idx += buff[idx + 1] + 2; /* jump to next op */
+                continue;
+            }
+
+            op_82_max_idx = idx + 2 + buff[idx + 1] - 1;
+            idx += 2; /* jump to dhcp option 82 sub-option */
+            while (idx <= op_82_max_idx)
+            {
+                if (0x0c != buff[idx])
+                {
+                    idx += buff[idx + 1] + 2; /* jump to next op */
+                    continue;
+                }
+
+                have_subop_12 = 1;
+                break; /* idx point to sub-op 12 */
+            }
+            break; /* idx point to sub-op 12 */
+        }
+    }
+
 /* SRT-188 thienlv: end */
 
 	if (packet->hlen > sizeof packet->chaddr) {
@@ -682,7 +723,7 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
 		return;
 	}
 
-	if (ip->address_count < 1 || ip->addresses == NULL) {
+	if ((ip->address_count < 1 || ip->addresses == NULL) && (have_subop_12 == 0)){ /* SRT-188 thienlv */
 		log_info("Discarding packet received on %s interface that "
 			 "has no IPv4 address assigned.", ip->name);
 		return;
