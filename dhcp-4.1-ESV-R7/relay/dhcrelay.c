@@ -77,6 +77,7 @@ typedef struct dhcpr_req_info
     char ifname [IFNAMSIZ];
     struct in_addr nh;
     int is_dropped;
+    int primary_addr_check;
 } dhcpr_req_info_t;
 
 /* SRT-188 thienlv: end */
@@ -815,6 +816,43 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
 	   forward the response to the correct net.    If it's already
 	   set, the response will be sent directly to the relay agent
 	   that set giaddr, so we won't see it. */
+
+    len = sizeof (dhcpr_req_info_t);
+    memset (&dhcpr_req, 0, sizeof (dhcpr_req_info_t));
+    memset (&rib_reply, 0, sizeof (dhcpr_req_info_t));
+    strncpy (dhcpr_req.ifname, ip->name, IFNAMSIZ);
+    dhcpr_req.p.family = AF_INET;
+    dhcpr_req.p.prefixlen = 32; /* Maximum mask */
+    dhcpr_req.primary_addr_check = ISC_TRUE;
+
+    if (0 <= rib_client_fd)
+    {
+        /* Send req message to RIB server */
+        if (len != sendto (rib_client_fd, &dhcpr_req, len, 0, (struct sockaddr *) &svaddr, 
+                           sizeof (struct sockaddr_un)))
+        {
+            log_error ("Can't send message to rib server: error [%d] %m\n", errno);
+            return;
+        }
+
+        numBytes = recvfrom (rib_client_fd, &rib_reply, sizeof (dhcpr_req_info_t), 0, NULL, NULL);
+        if (0 > numBytes)
+        {
+            log_error ("Can't receive message to rib server: error [%d] %m\n", errno);
+            return;
+        }
+
+        log_info ("Receive from RIB server %d bytes and Nexthop [%s]\n", 
+            numBytes, inet_ntoa (rib_reply.nh));
+
+        if ((ISC_TRUE == rib_reply.primary_addr_check) 
+            && (ip->addresses[0].s_addr != rib_reply.nh.s_addr)
+            && (rib_reply.nh.s_addr))
+        {
+            ip->addresses[0] = rib_reply.nh;
+        }
+    }
+
 	if (!packet->giaddr.s_addr)
 		packet->giaddr = ip->addresses[0];
 	if (packet->hops < max_hop_count)
