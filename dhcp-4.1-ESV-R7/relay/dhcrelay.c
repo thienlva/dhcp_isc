@@ -52,6 +52,12 @@
 #define RIB_SERVER_SOCK_PATH        "/tmp/rib_serv_dhcpr"
 #define DHCPR_CLIENT_PATH           "/tmp/dhcpr_client_"
 
+enum 
+{
+    DO_NOT_DROP_DHCP_REQ = 0,
+    DROP_DHCP_REQ
+};
+
 int rib_client_fd = 0;
 struct sockaddr_un svaddr;
 struct sockaddr_un claddr;
@@ -70,6 +76,7 @@ typedef struct dhcpr_req_info
     struct prefix_ipv4 p;
     char ifname [IFNAMSIZ];
     struct in_addr nh;
+    int is_dropped;
 } dhcpr_req_info_t;
 
 /* SRT-188 thienlv: end */
@@ -807,6 +814,42 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
 	/* Otherwise, it's a BOOTREQUEST, so forward it to all the
 	   servers. */
 	for (sp = servers; sp; sp = sp->next) {
+        /* Send msg to RIB. Check global routing in case of incomming intf is VRF */
+        len = sizeof (dhcpr_req_info_t);
+        memset (&dhcpr_req, 0, sizeof (dhcpr_req_info_t));
+        memset (&rib_reply, 0, sizeof (dhcpr_req_info_t));
+        strncpy (dhcpr_req.ifname, ip->name, IFNAMSIZ);
+        dhcpr_req.p.family = AF_INET;
+        dhcpr_req.p.prefixlen = 32; /* Maximum mask */
+        memcpy (&dhcpr_req.p.prefix, &sp->to.sin_addr, sizeof (struct in_addr));
+        
+        if (0 <= rib_client_fd)
+        {
+            /* Send req message to RIB server */
+            if (len != sendto (rib_client_fd, &dhcpr_req, len, 0, (struct sockaddr *) &svaddr, 
+                               sizeof (struct sockaddr_un)))
+            {
+                log_error ("Can't send message to rib server: error [%d] %m\n", errno);
+                return;
+            }
+        
+            numBytes = recvfrom (rib_client_fd, &rib_reply, sizeof (dhcpr_req_info_t), 0, NULL, NULL);
+            if (0 > numBytes)
+            {
+                log_error ("Can't receive message to rib server: error [%d] %m\n", errno);
+                return;
+            }
+            log_info ("Receive from RIB server %d bytes and Nexthop [%s]\n", 
+                numBytes, inet_ntoa (rib_reply.nh));
+
+            if (DROP_DHCP_REQ == rib_reply.is_dropped)
+            {
+                log_error ("Drop DHCP packet to %s because send from VRF to global\n", 
+                            inet_ntoa(sp->to.sin_addr));
+                continue;
+            }
+        }
+
 		ret = send_packet((fallback_interface
 				 ? fallback_interface : interfaces),
 				 NULL, packet, length, ip->addresses[0],
