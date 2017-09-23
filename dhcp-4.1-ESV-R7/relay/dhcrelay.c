@@ -687,6 +687,17 @@ do_relay4(struct interface_info *ip, struct dhcp_packet *packet,
     int idx = 240; /* start dhcp option */
     int is_mpls_dhcp_reply = 0;
 
+    /* SRT-233 Start */
+    if (!packet)
+        return;
+
+    if ((BOOTREQUEST != packet->op) && (BOOTREPLY != packet->op))
+    {
+        log_error ("Discarding packet has unknow opcode.");
+        return;
+    }
+    /* SRT-233 End */
+
     buff = (char *) packet;
     if (!buff)
         return;
